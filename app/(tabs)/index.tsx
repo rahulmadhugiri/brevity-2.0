@@ -1,58 +1,82 @@
-// Brevity 2.0 Home Screen
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Image, TouchableOpacity, StyleSheet, Dimensions, useColorScheme, Animated, PanResponder } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
-import { MediaControl, PlaybackState, Command, MediaControlEvent } from 'expo-media-control';
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ContentGenerator, AudioContent } from '@/services/ContentGenerator';
+import { Command, MediaControl, MediaControlEvent, PlaybackState } from 'expo-media-control';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActionSheetIOS,
+  Alert,
+  Animated,
+  Dimensions,
+  Easing,
+  FlatList,
+  GestureResponderEvent,
+  Image,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  useColorScheme,
+} from 'react-native';
+
 import { Colors } from '@/constants/colors';
+import { useAuth } from '@/contexts/AuthContext';
+import { AudioContent, ContentGenerator } from '@/services/ContentGenerator';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Layout constants
 const CARD_SIZE = 350;
 const CARD_LEFT = (SCREEN_WIDTH - CARD_SIZE) / 2;
 const IMAGE_TOP = SCREEN_HEIGHT * 0.157;
 const IMAGE_BOTTOM = IMAGE_TOP + CARD_SIZE;
 
-// Spacing from design specs
 const TITLE_OFFSET = 38;
-const TITLE_HEIGHT = 23 + 8; // font size + margin
+const TITLE_HEIGHT = 23 + 8;
 const SUBTITLE_HEIGHT = 18;
 const PROGRESS_OFFSET = 65;
 const PROGRESS_HEIGHT = 3;
 const CONTROLS_OFFSET = 79;
+const FORCE_SHOW_SWIPE_HINT_FOR_TESTING = false;
 
 export default function HomeScreen() {
   const colorScheme = useColorScheme();
   const theme = colorScheme === 'dark' ? Colors.dark : Colors.light;
+  const { user, onboarding, markFeedHintSeen, signOutUser } = useAuth();
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [progress, setProgress] = useState(0);
-
-  // Animation values - use interpolation for ultra-smooth transitions
-  const slideAnim = useRef(new Animated.Value(0)).current;
+  const [isHintDismissed, setIsHintDismissed] = useState(onboarding.hasSeenFeedHint);
 
   const cards = ContentGenerator.getAllContent();
   const currentCard = cards[currentIndex];
 
-  // Use expo-audio hook for audio playback - start with first card's source
   const player = useAudioPlayer(cards[0].audioSource, {
-    updateInterval: 100, // Smooth progress bar updates
+    updateInterval: 100,
   });
   const status = useAudioPlayerStatus(player);
 
-  // Track if initial load has happened
-  const hasLoadedRef = useRef(false);
+  const pagerRef = useRef<FlatList<AudioContent>>(null);
+  const swipeHintAnim = useRef(new Animated.Value(0)).current;
+  const hintOverlayOpacity = useRef(new Animated.Value(onboarding.hasSeenFeedHint ? 0 : 1)).current;
   const lastIndexRef = useRef(0);
   const currentTimeRef = useRef(0);
-
-  // Refs for panResponder to access latest values
   const currentIndexRef = useRef(currentIndex);
   const cardsLengthRef = useRef(cards.length);
+  const isUserDraggingRef = useRef(false);
+  const pageChangeSourceRef = useRef<'user' | 'programmatic' | null>(null);
+  const isHintFadingRef = useRef(false);
 
-  // Keep refs in sync with state
+  const profileImageUri =
+    user?.photoURL ??
+    'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop';
+  const profileName = user?.displayName || 'Your Profile';
+  const profileEmail = user?.email || 'Signed in with Google';
+  const shouldShowSwipeHint =
+    !isHintDismissed && (FORCE_SHOW_SWIPE_HINT_FOR_TESTING || !onboarding.hasSeenFeedHint);
+
   useEffect(() => {
     currentIndexRef.current = currentIndex;
   }, [currentIndex]);
@@ -65,14 +89,13 @@ export default function HomeScreen() {
     currentTimeRef.current = status.currentTime;
   }, [status.currentTime]);
 
-  // Calculate adjacent indices for preloading
-  const prevIndex = Math.max(0, currentIndex - 1);
-  const nextIndex = Math.min(cards.length - 1, currentIndex + 1);
+  useEffect(() => {
+    if (onboarding.hasSeenFeedHint) {
+      setIsHintDismissed(true);
+      hintOverlayOpacity.setValue(0);
+    }
+  }, [onboarding.hasSeenFeedHint, hintOverlayOpacity]);
 
-  const prevCard = cards[prevIndex];
-  const nextCardData = cards[nextIndex];
-
-  // Set up audio mode for background playback
   useEffect(() => {
     setAudioModeAsync({
       playsInSilentMode: true,
@@ -81,7 +104,31 @@ export default function HomeScreen() {
     });
   }, []);
 
-  // Replace audio source when index changes
+  const goToIndex = useCallback(
+    (index: number, animated = true) => {
+      const clamped = Math.max(0, Math.min(cardsLengthRef.current - 1, index));
+      pageChangeSourceRef.current = 'programmatic';
+      setCurrentIndex(clamped);
+      pagerRef.current?.scrollToOffset({ offset: clamped * SCREEN_WIDTH, animated });
+      if (!animated) pageChangeSourceRef.current = null;
+    },
+    []
+  );
+
+  const goToNext = useCallback(() => {
+    const idx = currentIndexRef.current;
+    if (idx < cardsLengthRef.current - 1) {
+      goToIndex(idx + 1);
+    }
+  }, [goToIndex]);
+
+  const goToPrevious = useCallback(() => {
+    const idx = currentIndexRef.current;
+    if (idx > 0) {
+      goToIndex(idx - 1);
+    }
+  }, [goToIndex]);
+
   useEffect(() => {
     if (currentIndex !== lastIndexRef.current) {
       lastIndexRef.current = currentIndex;
@@ -90,7 +137,6 @@ export default function HomeScreen() {
     }
   }, [currentIndex, currentCard.audioSource, player]);
 
-  // Set up lock screen controls when player is ready
   useEffect(() => {
     if (player && status.isLoaded) {
       player.setActiveForLockScreen(true, {
@@ -101,7 +147,6 @@ export default function HomeScreen() {
     }
   }, [player, status.isLoaded, currentCard.title, currentCard.category, currentCard.image]);
 
-  // Enable media controls for remote commands (AirPods next/previous)
   useEffect(() => {
     let removeListener: (() => void) | null = null;
 
@@ -165,7 +210,6 @@ export default function HomeScreen() {
     };
   }, [goToNext, goToPrevious, player]);
 
-  // Keep media control metadata in sync
   useEffect(() => {
     if (!status.isLoaded) return;
     MediaControl.updateMetadata({
@@ -176,15 +220,8 @@ export default function HomeScreen() {
     }).catch((error) => {
       console.error('Failed to update media metadata:', error);
     });
-  }, [
-    status.isLoaded,
-    status.duration,
-    currentCard.title,
-    currentCard.category,
-    currentCard.image,
-  ]);
+  }, [status.isLoaded, status.duration, currentCard.title, currentCard.category, currentCard.image]);
 
-  // Update media control playback state
   useEffect(() => {
     if (!status.isLoaded) return;
     const state = status.playing ? PlaybackState.PLAYING : PlaybackState.PAUSED;
@@ -193,115 +230,75 @@ export default function HomeScreen() {
     });
   }, [status.isLoaded, status.playing]);
 
-  // Auto-play when loaded
   useEffect(() => {
     if (status.isLoaded && !status.playing && status.currentTime === 0) {
       player.play();
     }
-  }, [status.isLoaded, player]);
+  }, [status.isLoaded, status.playing, status.currentTime, player]);
 
-  // Update progress from status
   useEffect(() => {
     if (status.duration > 0) {
       setProgress(status.currentTime / status.duration);
     }
   }, [status.currentTime, status.duration]);
 
-  // Auto-advance to next card when finished
   useEffect(() => {
     if (status.didJustFinish) {
-      const idx = currentIndexRef.current;
-      const totalCards = cardsLengthRef.current;
-      if (idx < totalCards - 1) {
-        const newIndex = idx + 1;
-        Animated.timing(slideAnim, {
-          toValue: newIndex,
-          duration: 350,
-          useNativeDriver: true,
-        }).start(() => {
-          setCurrentIndex(newIndex);
-        });
-      }
+      goToNext();
     }
-  }, [status.didJustFinish, slideAnim]);
+  }, [status.didJustFinish, goToNext]);
 
-  // Navigation functions
-  const goToNext = useCallback(() => {
-    const idx = currentIndexRef.current;
-    const totalCards = cardsLengthRef.current;
-    if (idx < totalCards - 1) {
-      const newIndex = idx + 1;
-      Animated.timing(slideAnim, {
-        toValue: newIndex,
-        duration: 350,
+  useEffect(() => {
+    if (!shouldShowSwipeHint) return;
+
+    swipeHintAnim.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(swipeHintAnim, {
+        toValue: 1,
+        duration: 1900,
+        easing: Easing.linear,
         useNativeDriver: true,
-      }).start(() => {
-        setCurrentIndex(newIndex);
+      })
+    );
+
+    loop.start();
+    return () => {
+      loop.stop();
+      swipeHintAnim.setValue(0);
+    };
+  }, [shouldShowSwipeHint, swipeHintAnim]);
+
+  const dismissSwipeHint = useCallback(() => {
+    if (isHintDismissed || isHintFadingRef.current) return;
+
+    isHintFadingRef.current = true;
+    Animated.timing(hintOverlayOpacity, {
+      toValue: 0,
+      duration: 260,
+      useNativeDriver: true,
+    }).start(() => {
+      setIsHintDismissed(true);
+      isHintFadingRef.current = false;
+      markFeedHintSeen().catch((error) => {
+        console.error('Failed to persist feed hint state:', error);
       });
+    });
+  }, [hintOverlayOpacity, isHintDismissed, markFeedHintSeen]);
+
+  const handlePageChanged = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const nextIndex = Math.round(offsetX / SCREEN_WIDTH);
+    if (nextIndex !== currentIndexRef.current && nextIndex >= 0 && nextIndex < cards.length) {
+      setCurrentIndex(nextIndex);
     }
-  }, [slideAnim]);
 
-  const goToPrevious = useCallback(() => {
-    const idx = currentIndexRef.current;
-    if (idx > 0) {
-      const newIndex = idx - 1;
-      Animated.timing(slideAnim, {
-        toValue: newIndex,
-        duration: 350,
-        useNativeDriver: true,
-      }).start(() => {
-        setCurrentIndex(newIndex);
-      });
+    const isUserDriven = pageChangeSourceRef.current === 'user' || isUserDraggingRef.current;
+    if (isUserDriven && nextIndex > 0) {
+      dismissSwipeHint();
     }
-  }, [slideAnim]);
-
-  const handlePrevious = goToPrevious;
-  const handleNext = goToNext;
-
-  // Swipe gesture handler for card navigation
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        // Only respond to horizontal swipes
-        return Math.abs(gestureState.dx) > Math.abs(gestureState.dy) && Math.abs(gestureState.dx) > 10;
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        const { dx, vx } = gestureState;
-        const swipeThreshold = 50;
-        const velocityThreshold = 0.3;
-        const idx = currentIndexRef.current;
-        const totalCards = cardsLengthRef.current;
-
-        // Swipe left (next) or swipe right (previous)
-        if (dx < -swipeThreshold || vx < -velocityThreshold) {
-          // Swiped left - go to next
-          if (idx < totalCards - 1) {
-            const newIndex = idx + 1;
-            Animated.timing(slideAnim, {
-              toValue: newIndex,
-              duration: 350,
-              useNativeDriver: true,
-            }).start(() => {
-              setCurrentIndex(newIndex);
-            });
-          }
-        } else if (dx > swipeThreshold || vx > velocityThreshold) {
-          // Swiped right - go to previous
-          if (idx > 0) {
-            const newIndex = idx - 1;
-            Animated.timing(slideAnim, {
-              toValue: newIndex,
-              duration: 350,
-              useNativeDriver: true,
-            }).start(() => {
-              setCurrentIndex(newIndex);
-            });
-          }
-        }
-      },
-    })
-  ).current;
+    isUserDraggingRef.current = false;
+    pageChangeSourceRef.current = null;
+  };
 
   const handlePlayPause = () => {
     if (status.playing) {
@@ -311,12 +308,42 @@ export default function HomeScreen() {
     }
   };
 
-  const handleProgressBarPress = async (event: any) => {
+  const handleProfilePress = () => {
+    const doSignOut = () => {
+      signOutUser().catch((error) => {
+        Alert.alert('Sign out failed', error instanceof Error ? error.message : 'Please try again.');
+      });
+    };
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: profileName,
+          message: profileEmail,
+          options: ['Cancel', 'Sign Out'],
+          cancelButtonIndex: 0,
+          destructiveButtonIndex: 1,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 1) {
+            doSignOut();
+          }
+        }
+      );
+      return;
+    }
+
+    Alert.alert(profileName, profileEmail, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign Out', style: 'destructive', onPress: doSignOut },
+    ]);
+  };
+
+  const handleProgressBarPress = async (event: GestureResponderEvent) => {
     if (!status.duration) return;
 
     const { locationX } = event.nativeEvent;
-    const progressBarWidth = CARD_SIZE; // Same width as card
-    const newProgress = locationX / progressBarWidth;
+    const newProgress = locationX / CARD_SIZE;
     const newPosition = newProgress * status.duration;
 
     try {
@@ -327,100 +354,96 @@ export default function HomeScreen() {
     }
   };
 
+  const hintTranslateX = swipeHintAnim.interpolate({
+    inputRange: [0, 0.3, 0.78, 1],
+    outputRange: [0, 0, -96, -96],
+  });
+  const hintDotScale = swipeHintAnim.interpolate({
+    inputRange: [0, 0.16, 0.78, 1],
+    outputRange: [1, 0.5, 0.5, 0.5],
+  });
+  const hintDotOpacity = swipeHintAnim.interpolate({
+    inputRange: [0, 0.2, 0.72, 0.9, 1],
+    outputRange: [1, 0.95, 0.95, 0.25, 0],
+  });
+
+  const renderPage = ({ item }: { item: AudioContent }) => {
+    return (
+      <View style={styles.page}>
+        <View style={styles.backgroundImageContainer}>
+          <Image
+            source={typeof item.image === 'string' ? { uri: item.image } : item.image}
+            style={styles.backgroundImage}
+            blurRadius={100}
+            resizeMode="cover"
+          />
+          <LinearGradient
+            colors={[
+              colorScheme === 'dark' ? 'rgba(10, 10, 10, 0)' : 'rgba(249, 249, 249, 0)',
+              colorScheme === 'dark' ? 'rgba(10, 10, 10, 0.5)' : 'rgba(249, 249, 249, 0.5)',
+              colorScheme === 'dark' ? 'rgba(10, 10, 10, 0.85)' : 'rgba(249, 249, 249, 0.85)',
+              colorScheme === 'dark' ? '#0A0A0A' : '#F9F9F9',
+            ]}
+            style={styles.gradientOverlay}
+          />
+        </View>
+
+        <View style={styles.cardImageContainer}>
+          <Image
+            source={typeof item.image === 'string' ? { uri: item.image } : item.image}
+            style={styles.cardImage}
+            resizeMode="cover"
+          />
+        </View>
+      </View>
+    );
+  };
+
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
-      {/* Render all valid backgrounds (avoid duplicates) */}
-      {Array.from(new Set([prevIndex, currentIndex, nextIndex])).map((idx) => {
-        const card = cards[idx];
-        const opacity = slideAnim.interpolate({
-          inputRange: [idx - 1, idx, idx + 1],
-          outputRange: [0, 1, 0],
-          extrapolate: 'clamp',
-        });
-
-        return (
-          <Animated.View 
-            key={`bg-${idx}`}
-            style={[styles.backgroundImageContainer, { opacity }]}
-          >
-            <Image
-              source={typeof card.image === 'string' ? { uri: card.image } : card.image}
-              style={styles.backgroundImage}
-              blurRadius={100}
-              resizeMode="cover"
-            />
-            <LinearGradient
-              colors={[
-                colorScheme === 'dark' ? 'rgba(10, 10, 10, 0)' : 'rgba(249, 249, 249, 0)',
-                colorScheme === 'dark' ? 'rgba(10, 10, 10, 0.5)' : 'rgba(249, 249, 249, 0.5)',
-                colorScheme === 'dark' ? 'rgba(10, 10, 10, 0.85)' : 'rgba(249, 249, 249, 0.85)',
-                colorScheme === 'dark' ? '#0A0A0A' : '#F9F9F9',
-              ]}
-              style={styles.gradientOverlay}
-            />
-          </Animated.View>
-        );
-      })}
-
-      {/* Profile Picture - Top Right */}
-      <TouchableOpacity style={styles.profileButton}>
-        <Image
-          source={{ uri: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop' }}
-          style={styles.profileImage}
-        />
-      </TouchableOpacity>
-
-      {/* Render all unique cards (avoid duplicates) */}
-      {Array.from(new Set([prevIndex, currentIndex, nextIndex])).map((idx) => {
-        const card = cards[idx];
-        const translateX = slideAnim.interpolate({
-          inputRange: [idx - 1, idx, idx + 1],
-          outputRange: [SCREEN_WIDTH, 0, -SCREEN_WIDTH],
-          extrapolate: 'clamp',
-        });
-
-        return (
-          <Animated.View
-            key={`card-${idx}`}
-            style={[
-              styles.cardImageContainer,
-              {
-                transform: [{ translateX }],
-              },
-            ]}
-          >
-            <Image
-              source={typeof card.image === 'string' ? { uri: card.image } : card.image}
-              style={styles.cardImage}
-              resizeMode="cover"
-            />
-          </Animated.View>
-        );
-      })}
-
-      {/* Swipe gesture overlay on card area */}
-      <View
-        style={styles.swipeOverlay}
-        {...panResponder.panHandlers}
+      <FlatList
+        ref={pagerRef}
+        data={cards}
+        horizontal
+        pagingEnabled
+        bounces={false}
+        showsHorizontalScrollIndicator={false}
+        keyExtractor={(item) => item.id}
+        renderItem={renderPage}
+        onScrollBeginDrag={() => {
+          isUserDraggingRef.current = true;
+          pageChangeSourceRef.current = 'user';
+        }}
+        onMomentumScrollEnd={handlePageChanged}
+        onScrollToIndexFailed={(info) => {
+          pagerRef.current?.scrollToOffset({
+            offset: info.averageItemLength * info.index,
+            animated: true,
+          });
+        }}
+        getItemLayout={(_, index) => ({
+          length: SCREEN_WIDTH,
+          offset: SCREEN_WIDTH * index,
+          index,
+        })}
+        style={StyleSheet.absoluteFill}
       />
 
-      {/* Title - 38px below image, left aligned */}
-      <View style={styles.textContainer}>
+      <TouchableOpacity style={styles.profileButton} onPress={handleProfilePress}>
+        <Image source={{ uri: profileImageUri }} style={styles.profileImage} />
+      </TouchableOpacity>
+
+      <View style={styles.textContainer} pointerEvents="none">
         <Text style={[styles.title, { color: theme.primaryText }]}>{currentCard.title}</Text>
         <Text style={[styles.subtitle, { color: theme.secondaryText }]}>{currentCard.category}</Text>
       </View>
 
-      {/* Progress Bar - 65px below subtitle */}
-      <TouchableOpacity 
-        style={styles.progressBarContainer}
-        onPress={handleProgressBarPress}
-        activeOpacity={0.8}
-      >
+      <TouchableOpacity style={styles.progressBarContainer} onPress={handleProgressBarPress} activeOpacity={0.8}>
         <View style={[styles.progressBarBackground, { backgroundColor: theme.componentBackground }]}>
           <View
             style={[
               styles.progressBarFill,
-              { 
+              {
                 width: `${progress * 100}%`,
                 backgroundColor: theme.primaryText,
               },
@@ -429,11 +452,10 @@ export default function HomeScreen() {
         </View>
       </TouchableOpacity>
 
-      {/* Controls - 79px below progress bar */}
       <View style={styles.controlsContainer}>
         <TouchableOpacity
           style={[styles.controlButton, currentIndex === 0 && styles.controlButtonDisabled]}
-          onPress={handlePrevious}
+          onPress={goToPrevious}
           disabled={currentIndex === 0}
         >
           <MaterialIcons
@@ -443,10 +465,7 @@ export default function HomeScreen() {
           />
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.controlButton}
-          onPress={handlePlayPause}
-        >
+        <TouchableOpacity style={styles.controlButton} onPress={handlePlayPause}>
           <MaterialIcons
             name={status.playing ? 'pause-circle-filled' : 'play-circle-filled'}
             size={56}
@@ -455,11 +474,8 @@ export default function HomeScreen() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[
-            styles.controlButton,
-            currentIndex === cards.length - 1 && styles.controlButtonDisabled,
-          ]}
-          onPress={handleNext}
+          style={[styles.controlButton, currentIndex === cards.length - 1 && styles.controlButtonDisabled]}
+          onPress={goToNext}
           disabled={currentIndex === cards.length - 1}
         >
           <MaterialIcons
@@ -469,6 +485,25 @@ export default function HomeScreen() {
           />
         </TouchableOpacity>
       </View>
+
+      {shouldShowSwipeHint ? (
+        <Animated.View style={[styles.hintOverlay, { opacity: hintOverlayOpacity }]} pointerEvents="none">
+          <View style={styles.hintCenter}>
+            <View style={styles.hintGestureArea}>
+              <Animated.View
+                style={[
+                  styles.hintDot,
+                  {
+                    opacity: hintDotOpacity,
+                    transform: [{ translateX: hintTranslateX }, { scale: hintDotScale }],
+                  },
+                ]}
+              />
+            </View>
+            <Text style={styles.hintText}>The more you listen, the better your feed gets</Text>
+          </View>
+        </Animated.View>
+      ) : null}
     </View>
   );
 }
@@ -477,12 +512,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  page: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT,
+  },
   backgroundImageContainer: {
     position: 'absolute',
     top: 0,
     left: 0,
     width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.60, // Extended from 48% to 60%
+    height: SCREEN_HEIGHT * 0.6,
     overflow: 'hidden',
   },
   backgroundImage: {
@@ -494,7 +533,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: '70%', // Extended gradient coverage
+    height: '70%',
   },
   profileButton: {
     position: 'absolute',
@@ -528,15 +567,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 16,
     elevation: 10,
-  },
-  swipeOverlay: {
-    position: 'absolute',
-    top: IMAGE_TOP,
-    left: CARD_LEFT,
-    width: CARD_SIZE,
-    height: CARD_SIZE,
-    borderRadius: 15,
-    zIndex: 5,
   },
   cardImage: {
     width: '100%',
@@ -575,7 +605,14 @@ const styles = StyleSheet.create({
   },
   controlsContainer: {
     position: 'absolute',
-    top: IMAGE_BOTTOM + TITLE_OFFSET + TITLE_HEIGHT + SUBTITLE_HEIGHT + PROGRESS_OFFSET + PROGRESS_HEIGHT + CONTROLS_OFFSET,
+    top:
+      IMAGE_BOTTOM +
+      TITLE_OFFSET +
+      TITLE_HEIGHT +
+      SUBTITLE_HEIGHT +
+      PROGRESS_OFFSET +
+      PROGRESS_HEIGHT +
+      CONTROLS_OFFSET,
     left: 0,
     right: 0,
     flexDirection: 'row',
@@ -592,10 +629,36 @@ const styles = StyleSheet.create({
   controlButtonDisabled: {
     opacity: 0.3,
   },
-  preloadImage: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
+  hintOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    zIndex: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+  },
+  hintCenter: {
+    alignItems: 'center',
+    transform: [{ translateY: -75 }],
+  },
+  hintGestureArea: {
+    width: 260,
+    height: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hintDot: {
+    width: 50,
+    height: 50,
+    borderRadius: 100,
+    backgroundColor: '#FFFFFF',
+  },
+  hintText: {
+    marginTop: 50,
+    textAlign: 'center',
+    color: '#FFFFFF',
+    fontSize: 30,
+    fontWeight: '500',
+    lineHeight: 38,
   },
 });
