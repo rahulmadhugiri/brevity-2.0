@@ -20,7 +20,6 @@ Audio-first discovery: swipe through visual cards and listen to short clips with
 1. Tap play/pause to control audio.
 2. Tap previous/next to move between cards.
 3. Swipe on the card area to navigate.
-4. Tap the progress bar to seek.
 
 **Project structure**
 ```
